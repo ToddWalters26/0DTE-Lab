@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="0DTE Desk">
+<meta name="theme-color" content="#090a0c">
+<title>0DTE Desk</title>
+<style>
+:root{--bg:#090a0c;--card:#12141a;--border:#1e2229;--text:#f1f3f5;--muted:#8b929e;--dim:#5a616c;--green:#00e676;--red:#ff1744;--amber:#ffc400;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;padding:20px 16px 56px;max-width:460px;margin:0 auto;}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+.top h1{font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);}
+.btn{background:var(--card);border:1px solid var(--border);color:var(--text);font-size:12px;padding:6px 12px;border-radius:6px;}
+.tabs{display:flex;gap:8px;margin-bottom:16px;}
+.tab{flex:1;text-align:center;padding:8px;font-size:12px;font-weight:600;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;}
+.tab.active{color:var(--text);border-color:rgba(0,230,118,0.35);}
+.panel{display:none}.panel.active{display:block}
+.updated{font-size:11px;color:var(--dim);margin-bottom:12px;}
+.call{font-size:17px;font-weight:600;line-height:1.4;margin-bottom:8px;}
+.meta{font-size:12px;color:var(--muted);margin-bottom:18px;}
+.section-title{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.09em;color:var(--dim);margin:12px 0 10px;}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px;}
+.card.ok{border-color:rgba(0,230,118,0.3);}
+.card.warn{border-color:rgba(255,196,0,0.3);}
+.card.bad{border-color:rgba(255,23,68,0.25);}
+.card h3{font-size:15px;font-weight:600;margin-bottom:6px;}
+.card p{font-size:13px;color:var(--muted);margin-bottom:8px;}
+.card strong{color:var(--text);}
+.price-line{font-size:13px;font-variant-numeric:tabular-nums;color:var(--text);margin:8px 0;padding:8px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);}
+.status{font-size:13px;font-weight:600;margin:8px 0;}
+.status.met{color:var(--green);}
+.status.notmet{color:var(--red);}
+.status.watch{color:var(--amber);}
+.row{display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid var(--border);color:var(--muted);}
+.row:last-child{border-bottom:none}
+.row .r{color:var(--text);text-align:right;}
+.pill{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;}
+.pill-win{background:rgba(0,230,118,0.12);color:var(--green);}
+.pill-skip{background:rgba(90,97,108,0.2);color:var(--muted);}
+.pill-miss{background:rgba(255,196,0,0.12);color:var(--amber);}
+.footer{text-align:center;color:var(--dim);font-size:11px;margin-top:28px;}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>0DTE Desk</h1>
+  <span style="font-size:11px;color:var(--dim);">Auto-built</span>
+</div>
+<div class="tabs">
+  <div class="tab active" onclick="showTab('live')">Live</div>
+  <div class="tab" onclick="showTab('perf')">Performance</div>
+</div>
+
+<div id="tab-live" class="panel active">
+<div class="updated">Built Mon Oct 19 · 7:16 PM ET · run build_desk.py anytime for a fresh write-up</div>
+<div class="call">The 10:00 entry stack is not met for a clean SPY drive trade. Default action is to sit out unless a later rebuild shows a new setup.</div>
+<div class="meta">No drive-and-VWAP confirmation yet, so direction confidence stays moderate. Vol-persist score (prior range + trail): 6.</div>
+
+<div class="section-title">Where prices are now</div>
+<div class="card">
+  <h3>SPY</h3>
+  <div class="price-line">Last <strong>766.48</strong> · Prev close 763.25<br>Session open 767.23 · High 770.46 · Low 765.82 · Range 4.64</div>
+  <p>Move from open: -0.75. First-30-minute move: -0.96. Opening range: 2.24.</p>
+</div>
+<div class="card">
+  <h3>AAPL</h3>
+  <div class="price-line">Last <strong>342.94</strong> · Prev close 343.46<br>Session open 341.33 · High 346.00 · Low 340.11 · Range 5.89</div>
+  <p>Secondary ticker this week. Use only if SPY does not offer a clear slot.</p>
+</div>
+
+<div class="section-title">Entry stack status</div>
+<div class="card bad">
+  <h3>SPY drive + VWAP check</h3>
+  <p class="status notmet">CONDITIONS NOT MET</p>
+  <p><strong>Put stack:</strong> move from open in first 30 minutes was -0.96 (need about -1.50 or more); opening range was 2.24 (need about 2.00 or more); price was below VWAP.</p>
+  <p><strong>Call stack:</strong> move from open in first 30 minutes was -0.96 (need about +1.50 or more); opening range was 2.24 (need about 2.00 or more); price was not above VWAP.</p>
+</div>
+
+<div class="section-title">Monday slot</div>
+<div class="card bad">
+  <h3>Monday SPY put</h3>
+  <p class="status notmet">Conditions not met by 10:00 — Monday put slot is closed.</p>
+  <p>That optional trade required a clear downside drive by 10:00. If those conditions were not met, the slot is closed and should not be chased.</p>
+</div>
+
+<div class="section-title">Rest of week (updates when you rebuild)</div>
+<div class="card ok">
+  <h3>SPY Tuesday / next session (primary)</h3>
+  <p><strong>Confidence about 53%</strong> for a tradeable expansion setup if the 10:00 stack confirms.</p>
+  <p>Put path: wait for about 1.50 or more below the open by 10:00, opening range about 2.00 or more, and price below VWAP. Target area near 760–762 if the drive is down.</p>
+  <p>Call path: about 1.50 or more above the open, wide opening range, price above VWAP. Target area near 774–776 if the drive is up.</p>
+  <p>If the first 30 minutes are quiet, sit out and keep the weekly slot.</p>
+</div>
+<div class="card">
+  <h3>AAPL Wed/Thu (secondary)</h3>
+  <p><strong>Confidence about 45%</strong>. Only if SPY is already used or skipped. Watch the mid-340s; a failed hold with a clear drive is the idea, not a forced trade.</p>
+</div>
+
+<div class="section-title">How to refresh without chatting</div>
+<div class="card">
+  <p>On a computer, run <strong>python3 build_desk.py</strong> in this folder. It pulls prices, applies the rules, and overwrites this HTML.</p>
+  <p>You can schedule that command on weekdays (for example 9:50 and 10:05 ET) so the file is ready when you open it on your phone via iCloud/Files or a local server.</p>
+</div>
+</div>
+
+<div id="tab-perf" class="panel">
+<div class="section-title">Running totals</div>
+<div class="card">
+  <p>Seed week Oct 13–16: 2 taken shorts scored as wins; Oct 15 upside missed (no 10:00 drive); quiet days skipped.</p>
+  <p>Oct 19: Monday put conditions not met — recorded as a correct skip under the entry rule.</p>
+  <p>Live sample is still small. Thresholds should not be changed until more weeks are logged.</p>
+</div>
+<div class="card">
+  <div class="row"><span>Oct 14</span><span class="r"><span class="pill pill-win">WIN</span> short stack</span></div>
+  <div class="row"><span>Oct 15</span><span class="r"><span class="pill pill-miss">MISS</span> no drive</span></div>
+  <div class="row"><span>Oct 16</span><span class="r"><span class="pill pill-win">WIN</span> short stack</span></div>
+  <div class="row"><span>Oct 19</span><span class="r"><span class="pill pill-skip">SKIP</span> conditions not met</span></div>
+</div>
+</div>
+
+<div class="footer">Not financial advice. Generated locally by build_desk.py.</div>
+<script>
+function showTab(id){
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  document.querySelectorAll('.tab')[id==='live'?0:1].classList.add('active');
+}
+</script>
+</body>
+</html>

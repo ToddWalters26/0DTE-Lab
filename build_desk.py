@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """
-0DTE Desk generator — pulls SPY/AAPL data, runs the combined model rules,
-and writes index.html next to this script (GitHub Pages entry point).
-
-Usage:
-  python3 build_desk.py
-
-Optional schedule (Mac/Linux cron example, every weekday 9:45 and 10:05 ET):
-  45 9 * * 1-5 cd /path/to/folder && python3 build_desk.py
-  5 10 * * 1-5 cd /path/to/folder && python3 build_desk.py
+0DTE Desk generator — pulls SPY/AAPL data, runs rules, writes index.html.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -23,6 +14,8 @@ from zoneinfo import ZoneInfo
 ET = ZoneInfo("America/New_York")
 OUT = Path(__file__).resolve().parent / "index.html"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; DeskBot/1.0)"}
+
+DOW = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
 def fetch_json(url: str) -> dict:
@@ -40,7 +33,6 @@ def chart(symbol: str, interval: str, range_: str) -> dict:
 
 
 def session_from_5m(symbol: str) -> dict:
-    """Regular-session summary from 5m bars (ET)."""
     res = chart(symbol, "5m", "5d")
     meta = res["meta"]
     ts = res["timestamp"]
@@ -51,7 +43,6 @@ def session_from_5m(symbol: str) -> dict:
             continue
         et = datetime.fromtimestamp(t, tz=timezone.utc).astimezone(ET)
         hm = et.hour * 60 + et.minute
-        # RTH 9:30–16:00 ET
         if hm < 570 or hm > 960:
             continue
         bars.append(
@@ -71,9 +62,9 @@ def session_from_5m(symbol: str) -> dict:
             "price": meta.get("regularMarketPrice"),
             "prev": meta.get("previousClose") or meta.get("chartPreviousClose"),
             "error": "no RTH bars",
+            "now_et": datetime.now(ET),
         }
 
-    # last trading date in feed
     last_date = bars[-1]["date"]
     day = [b for b in bars if b["date"] == last_date]
     day_o = day[0]["o"]
@@ -95,7 +86,6 @@ def session_from_5m(symbol: str) -> dict:
         below_vwap_30 = b30[-1]["c"] < vwap_30 - 0.05
         above_vwap_30 = b30[-1]["c"] > vwap_30 + 0.05
 
-    # prior day range
     dates = sorted({b["date"] for b in bars})
     prev_rng = None
     if len(dates) >= 2:
@@ -109,7 +99,7 @@ def session_from_5m(symbol: str) -> dict:
         if dd:
             trail.append(max(b["h"] for b in dd) - min(b["l"] for b in dd))
     trail_avg = sum(trail) / len(trail) if trail else None
-    trail_large = sum(1 for x in trail if x > 7) / len(trail) if trail else 0
+    trail_large = sum(1 for x in trail if x > 7) / len(trail) if trail else 0.0
 
     return {
         "symbol": symbol,
@@ -134,6 +124,34 @@ def session_from_5m(symbol: str) -> dict:
     }
 
 
+def next_weekday(from_dt: datetime) -> datetime:
+    d = from_dt
+    for _ in range(1, 8):
+        d = d + timedelta(days=1)
+        if d.weekday() < 5:
+            return d
+    return from_dt + timedelta(days=1)
+
+
+def remaining_weekdays(from_dt: datetime) -> list[datetime]:
+    """Upcoming weekdays in the current calendar week (Mon–Fri), plus next week if weekend."""
+    out = []
+    # If weekend or after Friday close conceptually, show next Mon–Wed-ish
+    start = from_dt
+    if from_dt.weekday() >= 5:
+        start = next_weekday(from_dt)
+    elif from_dt.hour >= 16:
+        start = next_weekday(from_dt)
+
+    # Collect next 5 weekdays from start (covers rest of week + spill)
+    d = start
+    while len(out) < 5:
+        if d.weekday() < 5:
+            out.append(d)
+        d = d + timedelta(days=1)
+    return out
+
+
 def vol_persist_score(prev_rng, trail_large, trail_avg) -> int:
     s = 0
     if prev_rng is not None:
@@ -153,9 +171,10 @@ def vol_persist_score(prev_rng, trail_large, trail_avg) -> int:
     return s
 
 
-def entry_stack(side: str, s: dict) -> dict:
-    """Return whether drive+OR+VWAP stack is met for put/call."""
+def entry_stack(side: str, s: dict, after_10: bool) -> dict:
     m, o, bv, av = s.get("move_30"), s.get("or_30"), s.get("below_vwap_30"), s.get("above_vwap_30")
+    if not after_10:
+        return {"met": False, "reason": "Wait until 10:00 ET to judge the entry stack."}
     if m is None or o is None:
         return {"met": False, "reason": "Not enough first-30-minute data yet."}
     if side == "put":
@@ -175,7 +194,7 @@ def entry_stack(side: str, s: dict) -> dict:
     return {"met": ok, "reason": "; ".join(parts) + "."}
 
 
-def html_escape(t: str) -> str:
+def esc(t: str) -> str:
     return (
         t.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -184,94 +203,157 @@ def html_escape(t: str) -> str:
     )
 
 
+def px(x) -> str:
+    if x is None:
+        return "—"
+    try:
+        return f"{float(x):.2f}"
+    except Exception:
+        return "—"
+
+
 def build_html(spy: dict, aapl: dict) -> str:
     now = spy.get("now_et") or datetime.now(ET)
     hm = now.hour * 60 + now.minute
-    weekday = now.weekday()  # 0=Mon
     after_open = hm >= 570
     after_10 = hm >= 600
-    session_date = spy.get("date") or now.strftime("%Y-%m-%d")
+    after_close = hm >= 960 or now.weekday() >= 5
+
+    # Focus day: if after close or weekend, brief the NEXT trading day
+    if after_close or now.weekday() >= 5:
+        focus = next_weekday(now)
+        mode = "next_day"
+    else:
+        focus = now
+        mode = "today"
+
+    focus_name = DOW[focus.weekday()]
+    focus_date = focus.strftime("%b %-d")
 
     vp = vol_persist_score(spy.get("prev_rng"), spy.get("trail_large"), spy.get("trail_avg"))
-    put = entry_stack("put", spy) if after_10 else {"met": False, "reason": "Wait until 10:00 ET to judge the entry stack."}
-    call = entry_stack("call", spy) if after_10 else {"met": False, "reason": "Wait until 10:00 ET to judge the entry stack."}
+    put = entry_stack("put", spy, after_10 and mode == "today")
+    call = entry_stack("call", spy, after_10 and mode == "today")
 
-    # Monday optional put was the weekend plan; evaluate if today is that Monday session
-    monday_put_closed = session_date >= "2026-10-19" and (weekday > 0 or (weekday == 0 and after_10 and not put["met"]))
+    # Levels from latest session
+    last = spy.get("last") or spy.get("price")
+    high = spy.get("high")
+    low = spy.get("low")
+    day_range = spy.get("range")
 
-    # Confidence heuristics
-    tue_conf = 55
+    # Confidence for next/today setup
+    conf = 55
     if vp >= 4:
-        tue_conf += 8
-    if spy.get("range") and spy["range"] > 7 and weekday == 0:
-        tue_conf += 5
-    # If Monday held gap up, lean less on pure puts
+        conf += 10
+    if vp >= 6:
+        conf += 5
+    if day_range and day_range > 7:
+        conf += 5
+    # Monday gap-hold reduced pure bear continuation
     if spy.get("open") and spy.get("prev") and spy["open"] > spy["prev"] + 1:
-        tue_conf = max(45, tue_conf - 10)
-    tue_conf = max(35, min(78, tue_conf))
+        conf = max(45, conf - 8)
+    conf = max(40, min(78, conf))
 
-    if put["met"]:
-        action = "PUT CONDITIONS MET"
-        action_class = "met"
+    # Always 3 trade options for remaining week — independent of whether user traded
+    days = remaining_weekdays(now)
+    # Prefer: first upcoming = primary SPY, second = SPY alternate, third = AAPL
+    d1 = days[0]
+    d2 = days[1] if len(days) > 1 else days[0]
+    d3 = days[2] if len(days) > 2 else days[-1]
+
+    trade1 = {
+        "title": f"Trade 1 · SPY · {DOW[d1.weekday()]} {d1.strftime('%b %-d')}",
+        "conf": conf,
+        "body": (
+            f"Primary slot. At 10:00 ET, check three things: how far price has moved from the open, "
+            f"how wide the first 30 minutes were, and whether price is above or below VWAP. "
+            f"If SPY has dropped about 1.50 or more from the open, the opening range is about 2.00 or more, "
+            f"and price is below VWAP, take the put side toward roughly {px((low or 760) - 5)}–{px((low or 760) - 3)} "
+            f"if the drive continues. If SPY has risen about 1.50 or more, the range is wide, and price is above VWAP, "
+            f"take the call side toward roughly {px((high or 770) + 4)}–{px((high or 770) + 6)}. "
+            f"If the first 30 minutes are quiet, skip this day and keep the slot."
+        ),
+    }
+    trade2 = {
+        "title": f"Trade 2 · SPY · {DOW[d2.weekday()]} {d2.strftime('%b %-d')}",
+        "conf": max(40, conf - 10),
+        "body": (
+            f"Second SPY slot. Use the same 10:00 rules as Trade 1. "
+            f"This is available whether or not you took Trade 1 — the desk always keeps three options listed "
+            f"so you can choose based on your own trade count. Prefer this day if {DOW[d1.weekday()]} was quiet "
+            f"or the drive never confirmed."
+        ),
+    }
+    trade3 = {
+        "title": f"Trade 3 · AAPL · {DOW[d3.weekday()]} {d3.strftime('%b %-d')}",
+        "conf": 45,
+        "body": (
+            "Secondary ticker. Only use if you still want a third name or SPY is not clear. "
+            "Watch a failed hold near the mid-340s with a clear open drive and VWAP agreement. "
+            "If the open is choppy, skip AAPL entirely."
+        ),
+    }
+
+    if mode == "next_day":
         headline = (
-            f"SPY put entry stack is met as of {now.strftime('%I:%M %p')} ET. "
-            "Only take the trade if you still have a free weekly slot and risk is acceptable."
+            f"Session is closed. Here is the briefing for {focus_name}, {focus_date}."
         )
-        conf_note = f"Intraday confirmation raised confidence on the downside path for today."
-    elif call["met"]:
-        action = "CALL CONDITIONS MET"
-        action_class = "met"
-        headline = (
-            f"SPY call entry stack is met as of {now.strftime('%I:%M %p')} ET. "
-            "Only take the trade if you still have a free weekly slot and risk is acceptable."
+        sub = (
+            f"SPY last finished around {px(last)} with a day range of about {px(day_range)}. "
+            f"Vol-persist score is {vp}. The three trade options below are for the rest of the week; "
+            f"use whichever fit your own three-trade limit."
         )
-        conf_note = "Intraday confirmation favors the upside path for today."
-    elif after_10:
-        action = "CONDITIONS NOT MET"
-        action_class = "notmet"
-        headline = (
-            "The 10:00 entry stack is not met for a clean SPY drive trade. "
-            "Default action is to sit out unless a later rebuild shows a new setup."
+        stack_title = f"{focus_name} plan (decide at 10:00)"
+        stack_status = "WAITING FOR 10:00"
+        stack_class = "watch"
+        stack_body = (
+            f"Do not enter before 10:00 ET on {focus_name}. "
+            "After the first 30 minutes, take a trade only if the drive, opening range, and VWAP side all agree. "
+            "Otherwise sit out."
         )
-        conf_note = "No drive-and-VWAP confirmation yet, so direction confidence stays moderate."
-    elif after_open:
-        action = "WAITING FOR 10:00"
-        action_class = "watch"
-        headline = (
-            "The regular session has started. Wait for the first 30 minutes to finish, "
-            "then refresh this page to see whether put or call conditions are met."
-        )
-        conf_note = "Pre-10:00 — no entry decision yet."
+        put_line = "Put stack will be judged at 10:00 from that morning’s open."
+        call_line = "Call stack will be judged at 10:00 from that morning’s open."
     else:
-        action = "PRE-MARKET / CLOSED"
-        action_class = "watch"
-        headline = (
-            "Outside the decision window. When the next regular session reaches 10:00 ET, "
-            "run this script again (or use your schedule) for a conditions met / not met update."
+        if put["met"]:
+            headline = "SPY put entry conditions are met as of this update."
+            stack_status = "PUT CONDITIONS MET"
+            stack_class = "met"
+        elif call["met"]:
+            headline = "SPY call entry conditions are met as of this update."
+            stack_status = "CALL CONDITIONS MET"
+            stack_class = "met"
+        elif after_10:
+            headline = "The 10:00 entry stack is not met for a clean SPY drive trade."
+            stack_status = "CONDITIONS NOT MET"
+            stack_class = "notmet"
+        elif after_open:
+            headline = "The session is open. Wait for 10:00 before deciding."
+            stack_status = "WAITING FOR 10:00"
+            stack_class = "watch"
+        else:
+            headline = f"Pre-market briefing for {focus_name}, {focus_date}."
+            stack_status = "PRE-MARKET"
+            stack_class = "watch"
+        sub = (
+            f"SPY is around {px(spy.get('price'))}. "
+            f"Day range so far is about {px(day_range)}. Vol-persist score is {vp}."
         )
-        conf_note = "Model levels update when you rebuild during RTH."
+        stack_title = "Today’s entry stack"
+        stack_body = "Use the put and call checks below. Only act if one side fully qualifies."
+        put_line = put["reason"]
+        call_line = call["reason"]
 
-    def px(x):
-        return "—" if x is None else f"{x:.2f}"
+    stamp = now.strftime("%a %b %-d · %-I:%M %p ET")
 
-    spy_price_block = (
+    spy_prices = (
         f"Last <strong>{px(spy.get('price'))}</strong> · Prev close {px(spy.get('prev'))}<br>"
         f"Session open {px(spy.get('open'))} · High {px(spy.get('high'))} · Low {px(spy.get('low'))} · "
         f"Range {px(spy.get('range'))}"
     )
-    aapl_price_block = (
+    aapl_prices = (
         f"Last <strong>{px(aapl.get('price'))}</strong> · Prev close {px(aapl.get('prev'))}<br>"
         f"Session open {px(aapl.get('open'))} · High {px(aapl.get('high'))} · Low {px(aapl.get('low'))} · "
         f"Range {px(aapl.get('range'))}"
     )
-
-    mon_status = (
-        "<p class=\"status notmet\">Conditions not met by 10:00 — Monday put slot is closed.</p>"
-        if monday_put_closed
-        else f"<p class=\"status {action_class}\">{html_escape(action)}</p>"
-    )
-
-    stamp = now.strftime("%a %b %-d · %-I:%M %p ET") if hasattr(now, "strftime") else str(now)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -288,123 +370,87 @@ def build_html(spy: dict, aapl: dict) -> str:
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;padding:20px 16px 56px;max-width:460px;margin:0 auto;}}
 .top{{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}}
 .top h1{{font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);}}
-.btn{{background:var(--card);border:1px solid var(--border);color:var(--text);font-size:12px;padding:6px 12px;border-radius:6px;}}
-.tabs{{display:flex;gap:8px;margin-bottom:16px;}}
-.tab{{flex:1;text-align:center;padding:8px;font-size:12px;font-weight:600;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;}}
-.tab.active{{color:var(--text);border-color:rgba(0,230,118,0.35);}}
-.panel{{display:none}}.panel.active{{display:block}}
 .updated{{font-size:11px;color:var(--dim);margin-bottom:12px;}}
 .call{{font-size:17px;font-weight:600;line-height:1.4;margin-bottom:8px;}}
-.meta{{font-size:12px;color:var(--muted);margin-bottom:18px;}}
-.section-title{{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.09em;color:var(--dim);margin:12px 0 10px;}}
+.meta{{font-size:13px;color:var(--muted);margin-bottom:18px;}}
+.section-title{{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.09em;color:var(--dim);margin:14px 0 10px;}}
 .card{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px;}}
 .card.ok{{border-color:rgba(0,230,118,0.3);}}
 .card.warn{{border-color:rgba(255,196,0,0.3);}}
 .card.bad{{border-color:rgba(255,23,68,0.25);}}
 .card h3{{font-size:15px;font-weight:600;margin-bottom:6px;}}
 .card p{{font-size:13px;color:var(--muted);margin-bottom:8px;}}
+.card p:last-child{{margin-bottom:0;}}
 .card strong{{color:var(--text);}}
 .price-line{{font-size:13px;font-variant-numeric:tabular-nums;color:var(--text);margin:8px 0;padding:8px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);}}
 .status{{font-size:13px;font-weight:600;margin:8px 0;}}
 .status.met{{color:var(--green);}}
 .status.notmet{{color:var(--red);}}
 .status.watch{{color:var(--amber);}}
-.row{{display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid var(--border);color:var(--muted);}}
-.row:last-child{{border-bottom:none}}
-.row .r{{color:var(--text);text-align:right;}}
-.pill{{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;}}
-.pill-win{{background:rgba(0,230,118,0.12);color:var(--green);}}
-.pill-skip{{background:rgba(90,97,108,0.2);color:var(--muted);}}
-.pill-miss{{background:rgba(255,196,0,0.12);color:var(--amber);}}
-.footer{{text-align:center;color:var(--dim);font-size:11px;margin-top:28px;}}
+.conf{{font-weight:600;color:var(--amber);}}
+.footer{{text-align:center;color:var(--dim);font-size:11px;margin-top:28px;line-height:1.5;}}
 </style>
 </head>
 <body>
-<div class="top">
-  <h1>0DTE Desk</h1>
-  <span style="font-size:11px;color:var(--dim);">Auto-built</span>
-</div>
-<div class="tabs">
-  <div class="tab active" onclick="showTab('live')">Live</div>
-  <div class="tab" onclick="showTab('perf')">Performance</div>
-</div>
+<div class="top"><h1>0DTE Desk</h1><span style="font-size:11px;color:var(--dim);">Auto-built</span></div>
+<div class="updated">Built {esc(stamp)} · next auto rebuild on the weekday schedule</div>
 
-<div id="tab-live" class="panel active">
-<div class="updated">Built {html_escape(stamp)} · run build_desk.py anytime for a fresh write-up</div>
-<div class="call">{html_escape(headline)}</div>
-<div class="meta">{html_escape(conf_note)} Vol-persist score (prior range + trail): {vp}.</div>
+<div class="call">{esc(headline)}</div>
+<div class="meta">{esc(sub)}</div>
+
+<div class="section-title">Daily briefing · {esc(focus_name)} {esc(focus_date)}</div>
+<div class="card warn">
+  <h3>What to watch</h3>
+  <p>SPY reference levels from the latest session: high {px(high)}, low {px(low)}, last {px(last)}.</p>
+  <p>At 10:00 ET on {esc(focus_name)}, decide with the drive + opening-range + VWAP rule. Do not force a trade if the first 30 minutes are quiet.</p>
+  <p>You can take up to three trades this week. The list below always shows three options; pick based on what you have already done.</p>
+</div>
 
 <div class="section-title">Where prices are now</div>
 <div class="card">
   <h3>SPY</h3>
-  <div class="price-line">{spy_price_block}</div>
-  <p>Move from open: {px(spy.get('move_from_open'))}. First-30-minute move: {px(spy.get('move_30'))}. Opening range: {px(spy.get('or_30'))}.</p>
+  <div class="price-line">{spy_prices}</div>
+  <p>First-30-minute move: {px(spy.get('move_30'))}. Opening range: {px(spy.get('or_30'))}.</p>
 </div>
 <div class="card">
   <h3>AAPL</h3>
-  <div class="price-line">{aapl_price_block}</div>
-  <p>Secondary ticker this week. Use only if SPY does not offer a clear slot.</p>
+  <div class="price-line">{aapl_prices}</div>
+  <p>Secondary name this week.</p>
 </div>
 
-<div class="section-title">Entry stack status</div>
-<div class="card {'ok' if put['met'] or call['met'] else 'bad' if after_10 else 'warn'}">
-  <h3>SPY drive + VWAP check</h3>
-  <p class="status {action_class}">{html_escape(action)}</p>
-  <p><strong>Put stack:</strong> {html_escape(put['reason'])}</p>
-  <p><strong>Call stack:</strong> {html_escape(call['reason'])}</p>
+<div class="section-title">{esc(stack_title)}</div>
+<div class="card {'ok' if stack_class=='met' else 'bad' if stack_class=='notmet' else 'warn'}">
+  <p class="status {stack_class}">{esc(stack_status)}</p>
+  <p>{esc(stack_body)}</p>
+  <p><strong>Put check:</strong> {esc(put_line)}</p>
+  <p><strong>Call check:</strong> {esc(call_line)}</p>
 </div>
 
-<div class="section-title">Monday slot</div>
-<div class="card bad">
-  <h3>Monday SPY put</h3>
-  {mon_status}
-  <p>That optional trade required a clear downside drive by 10:00. If those conditions were not met, the slot is closed and should not be chased.</p>
-</div>
-
-<div class="section-title">Rest of week (updates when you rebuild)</div>
+<div class="section-title">Three trade options (always listed)</div>
 <div class="card ok">
-  <h3>SPY Tuesday / next session (primary)</h3>
-  <p><strong>Confidence about {tue_conf}%</strong> for a tradeable expansion setup if the 10:00 stack confirms.</p>
-  <p>Put path: wait for about 1.50 or more below the open by 10:00, opening range about 2.00 or more, and price below VWAP. Target area near 760–762 if the drive is down.</p>
-  <p>Call path: about 1.50 or more above the open, wide opening range, price above VWAP. Target area near 774–776 if the drive is up.</p>
-  <p>If the first 30 minutes are quiet, sit out and keep the weekly slot.</p>
+  <h3>{esc(trade1['title'])}</h3>
+  <p><span class="conf">Confidence about {trade1['conf']}%</span></p>
+  <p>{esc(trade1['body'])}</p>
 </div>
 <div class="card">
-  <h3>AAPL Wed/Thu (secondary)</h3>
-  <p><strong>Confidence about 45%</strong>. Only if SPY is already used or skipped. Watch the mid-340s; a failed hold with a clear drive is the idea, not a forced trade.</p>
+  <h3>{esc(trade2['title'])}</h3>
+  <p><span class="conf">Confidence about {trade2['conf']}%</span></p>
+  <p>{esc(trade2['body'])}</p>
+</div>
+<div class="card">
+  <h3>{esc(trade3['title'])}</h3>
+  <p><span class="conf">Confidence about {trade3['conf']}%</span></p>
+  <p>{esc(trade3['body'])}</p>
 </div>
 
-<div class="section-title">How to refresh without chatting</div>
+<div class="section-title">Simple rules</div>
 <div class="card">
-  <p>On a computer, run <strong>python3 build_desk.py</strong> in this folder. It pulls prices, applies the rules, and overwrites this HTML.</p>
-  <p>You can schedule that command on weekdays (for example 9:50 and 10:05 ET) so the file is ready when you open it on your phone via iCloud/Files or a local server.</p>
-</div>
+  <p>1. After the close, this page shifts the briefing to the next trading day.</p>
+  <p>2. At 10:00, take a side only if move size, opening range, and VWAP all agree.</p>
+  <p>3. Three options stay listed all week so you can choose without reporting fills to the model.</p>
 </div>
 
-<div id="tab-perf" class="panel">
-<div class="section-title">Running totals</div>
-<div class="card">
-  <p>Seed week Oct 13–16: 2 taken shorts scored as wins; Oct 15 upside missed (no 10:00 drive); quiet days skipped.</p>
-  <p>Oct 19: Monday put conditions not met — recorded as a correct skip under the entry rule.</p>
-  <p>Live sample is still small. Thresholds should not be changed until more weeks are logged.</p>
-</div>
-<div class="card">
-  <div class="row"><span>Oct 14</span><span class="r"><span class="pill pill-win">WIN</span> short stack</span></div>
-  <div class="row"><span>Oct 15</span><span class="r"><span class="pill pill-miss">MISS</span> no drive</span></div>
-  <div class="row"><span>Oct 16</span><span class="r"><span class="pill pill-win">WIN</span> short stack</span></div>
-  <div class="row"><span>Oct 19</span><span class="r"><span class="pill pill-skip">SKIP</span> conditions not met</span></div>
-</div>
-</div>
-
-<div class="footer">Not financial advice. Generated locally by build_desk.py.</div>
-<script>
-function showTab(id){{
-  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.getElementById('tab-'+id).classList.add('active');
-  document.querySelectorAll('.tab')[id==='live'?0:1].classList.add('active');
-}}
-</script>
+<div class="footer">Not financial advice. Generated by build_desk.py · research only.</div>
 </body>
 </html>
 """
@@ -420,7 +466,7 @@ def main():
     print(f"Wrote {OUT}")
     print(
         f"SPY last={spy.get('price')} range={spy.get('range')} "
-        f"move30={spy.get('move_30')} or30={spy.get('or_30')} vp_prev={spy.get('prev_rng')}"
+        f"move30={spy.get('move_30')} mode_time={spy.get('now_et')}"
     )
 
 
